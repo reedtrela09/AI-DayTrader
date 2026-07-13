@@ -10,7 +10,12 @@ class AIScanner:
 
     def __init__(self):
         project_root = Path(__file__).resolve().parents[2]
-        model_path = project_root / "models" / "random_forest.pkl"
+
+        model_path = (
+            project_root
+            / "models"
+            / "random_forest_validation.pkl"
+        )
 
         if not model_path.exists():
             raise FileNotFoundError(

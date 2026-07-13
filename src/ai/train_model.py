@@ -11,45 +11,57 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from sklearn.model_selection import train_test_split
 
 from src.config.features import FEATURE_COLUMNS
 
 
 class AITrainer:
 
-    def train(self, csv_file):
+    def train(
+        self,
+        train_csv: str,
+        validation_csv: str,
+    ) -> None:
 
-        print("Loading training data...")
+        print("Loading training and validation data...")
 
-        df = pd.read_csv(csv_file)
+        train_df = pd.read_csv(train_csv)
+        validation_df = pd.read_csv(validation_csv)
 
         required_columns = FEATURE_COLUMNS + ["Target"]
 
-        missing_columns = [
-            column
-            for column in required_columns
-            if column not in df.columns
-        ]
+        for name, df in [
+            ("training", train_df),
+            ("validation", validation_df),
+        ]:
+            missing_columns = [
+                column
+                for column in required_columns
+                if column not in df.columns
+            ]
 
-        if missing_columns:
-            raise ValueError(
-                "Training data is missing these columns: "
-                + ", ".join(missing_columns)
-            )
+            if missing_columns:
+                raise ValueError(
+                    f"{name.title()} data is missing columns: "
+                    + ", ".join(missing_columns)
+                )
 
-        df = df.dropna(subset=required_columns)
+        train_df = train_df.dropna(
+            subset=required_columns
+        ).reset_index(drop=True)
 
-        X = df[FEATURE_COLUMNS]
-        y = df["Target"].astype(int)
+        validation_df = validation_df.dropna(
+            subset=required_columns
+        ).reset_index(drop=True)
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X,
-            y,
-            test_size=0.20,
-            shuffle=False,
-        )
+        X_train = train_df[FEATURE_COLUMNS]
+        y_train = train_df["Target"].astype(int)
 
+        X_validation = validation_df[FEATURE_COLUMNS]
+        y_validation = validation_df["Target"].astype(int)
+
+        print(f"Training rows: {len(train_df):,}")
+        print(f"Validation rows: {len(validation_df):,}")
         print("Training AI...")
 
         model = RandomForestClassifier(
@@ -61,25 +73,28 @@ class AITrainer:
 
         model.fit(X_train, y_train)
 
-        predictions = model.predict(X_test)
+        predictions = model.predict(X_validation)
 
-        print("\n========== MODEL REPORT ==========")
-        print(f"Accuracy : {accuracy_score(y_test, predictions):.2%}")
+        print("\n========== VALIDATION REPORT ==========")
+        print(
+            f"Accuracy : "
+            f"{accuracy_score(y_validation, predictions):.2%}"
+        )
         print(
             f"Precision: "
-            f"{precision_score(y_test, predictions, zero_division=0):.2%}"
+            f"{precision_score(y_validation, predictions, zero_division=0):.2%}"
         )
         print(
             f"Recall   : "
-            f"{recall_score(y_test, predictions, zero_division=0):.2%}"
+            f"{recall_score(y_validation, predictions, zero_division=0):.2%}"
         )
         print(
             f"F1 Score : "
-            f"{f1_score(y_test, predictions, zero_division=0):.2%}"
+            f"{f1_score(y_validation, predictions, zero_division=0):.2%}"
         )
 
         print("\nConfusion Matrix")
-        print(confusion_matrix(y_test, predictions))
+        print(confusion_matrix(y_validation, predictions))
 
         print("\nFeature Importance")
 
@@ -96,7 +111,10 @@ class AITrainer:
         model_folder = project_root / "models"
         model_folder.mkdir(parents=True, exist_ok=True)
 
-        model_path = model_folder / "random_forest.pkl"
+        model_path = (
+            model_folder
+            / "random_forest_validation.pkl"
+        )
 
         joblib.dump(model, model_path)
 

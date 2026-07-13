@@ -6,6 +6,10 @@ sys.path.insert(0, str(project_root))
 
 from src.ai.train_model import AITrainer
 
+
 trainer = AITrainer()
 
-trainer.train("data/processed/combined_training.csv")
+trainer.train(
+    "data/processed/splits/combined_train.csv",
+    "data/processed/splits/combined_validation.csv",
+)
