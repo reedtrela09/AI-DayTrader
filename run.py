@@ -1,6 +1,11 @@
+import os
+import time
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
+from alpaca.trading.client import TradingClient
 
 from src.config.watchlist import WATCHLIST
 from src.data.alpaca_data import AlpacaDataManager
@@ -11,6 +16,24 @@ from src.scanner.scanner import AIScanner
 PROJECT_ROOT = Path(__file__).resolve().parent
 RAW_FOLDER = PROJECT_ROOT / "data" / "raw"
 PROCESSED_FOLDER = PROJECT_ROOT / "data" / "processed"
+
+SCAN_INTERVAL_SECONDS = 300  # 5 minutes
+
+
+def create_trading_client() -> TradingClient:
+    load_dotenv(PROJECT_ROOT / ".env")
+
+    api_key = os.getenv("ALPACA_API_KEY")
+    secret_key = os.getenv("ALPACA_SECRET_KEY")
+
+    if not api_key or not secret_key:
+        raise ValueError("Alpaca API keys were not found in .env.")
+
+    return TradingClient(
+        api_key=api_key,
+        secret_key=secret_key,
+        paper=True,
+    )
 
 
 def get_action(confidence: float) -> str:
@@ -43,7 +66,7 @@ def refresh_symbol(
         for column in df.columns
     ]
 
-    required_raw_columns = [
+    required_columns = [
         "timestamp",
         "open",
         "high",
@@ -54,7 +77,7 @@ def refresh_symbol(
 
     missing_columns = [
         column
-        for column in required_raw_columns
+        for column in required_columns
         if column not in df.columns
     ]
 
@@ -100,14 +123,11 @@ def display_results(results: list[dict]) -> None:
         f"{'Rank':<6}"
         f"{'Symbol':<9}"
         f"{'Confidence':<14}"
-        f"{'Action'}"
+        f"Action"
     )
     print("-" * 45)
 
-    for rank, result in enumerate(
-        results,
-        start=1,
-    ):
+    for rank, result in enumerate(results, start=1):
         print(
             f"{rank:<6}"
             f"{result['symbol']:<9}"
@@ -119,18 +139,17 @@ def display_results(results: list[dict]) -> None:
     print("=" * 60)
 
 
-def main() -> None:
+def run_scan(
+    data_manager: AlpacaDataManager,
+    feature_engine: FeatureEngine,
+    scanner: AIScanner,
+) -> None:
     print()
     print("=" * 60)
     print(" AI DAYTRADER")
     print("=" * 60)
+    print(f"Scan started: {datetime.now():%Y-%m-%d %H:%M:%S}")
     print()
-    print("Refreshing market data and rebuilding features...")
-    print()
-
-    data_manager = AlpacaDataManager()
-    feature_engine = FeatureEngine()
-    scanner = AIScanner()
 
     results = []
 
@@ -158,17 +177,57 @@ def main() -> None:
             )
 
         except Exception as error:
-            print(
-                f"Could not process {symbol}: "
-                f"{error}"
-            )
+            print(f"Could not process {symbol}: {error}")
 
-    if not results:
-        print()
+    if results:
+        display_results(results)
+    else:
         print("No symbols were successfully scanned.")
-        return
 
-    display_results(results)
+
+def main() -> None:
+    trading_client = create_trading_client()
+    data_manager = AlpacaDataManager()
+    feature_engine = FeatureEngine()
+    scanner = AIScanner()
+
+    print()
+    print("AI-DayTrader started.")
+    print("Press Ctrl+C to stop.")
+
+    try:
+        while True:
+            clock = trading_client.get_clock()
+
+            if clock.is_open:
+                print()
+                print("Market status: OPEN")
+                print(f"Next close: {clock.next_close}")
+
+                run_scan(
+                    data_manager=data_manager,
+                    feature_engine=feature_engine,
+                    scanner=scanner,
+                )
+
+                print(
+                    f"\nNext scan in "
+                    f"{SCAN_INTERVAL_SECONDS // 60} minutes."
+                )
+
+                time.sleep(SCAN_INTERVAL_SECONDS)
+
+            else:
+                print()
+                print("Market status: CLOSED")
+                print(f"Next open: {clock.next_open}")
+                print("Checking again in 5 minutes.")
+
+                time.sleep(SCAN_INTERVAL_SECONDS)
+
+    except KeyboardInterrupt:
+        print()
+        print("AI-DayTrader stopped safely.")
 
 
 if __name__ == "__main__":
