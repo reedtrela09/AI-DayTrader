@@ -21,6 +21,7 @@ from src.config.settings import (
 from src.config.watchlist import WATCHLIST
 from src.data.alpaca_data import AlpacaDataManager
 from src.features.feature_engine import FeatureEngine
+from src.journal.trade_journal import TradeJournal
 from src.risk.risk_manager import RiskManager
 from src.scanner.scanner import AIScanner
 
@@ -107,7 +108,9 @@ def refresh_symbol(
     raw_file = RAW_FOLDER / f"{symbol}_5min.csv"
     dataframe.to_csv(raw_file, index=False)
 
-    features_dataframe = feature_engine.build(dataframe)
+    features_dataframe = feature_engine.build(
+        dataframe
+    )
 
     processed_file = (
         PROCESSED_FOLDER
@@ -141,7 +144,10 @@ def display_rankings(results: list[dict]) -> None:
     )
     print("-" * 48)
 
-    for rank, result in enumerate(results, start=1):
+    for rank, result in enumerate(
+        results,
+        start=1,
+    ):
         print(
             f"{rank:<6}"
             f"{result['symbol']:<9}"
@@ -153,14 +159,19 @@ def display_rankings(results: list[dict]) -> None:
     print("=" * 65)
 
 
-def display_trade_decision(decision: dict) -> None:
+def display_trade_decision(
+    decision: dict,
+) -> None:
     print()
     print("=" * 65)
     print(" DRY-RUN TRADE DECISION")
     print("=" * 65)
 
     print(f"Symbol       : {decision['symbol']}")
-    print(f"Confidence   : {decision['confidence']:.2%}")
+    print(
+        f"Confidence   : "
+        f"{decision['confidence']:.2%}"
+    )
 
     if not decision["approved"]:
         print("Decision     : REJECTED")
@@ -173,9 +184,18 @@ def display_trade_decision(decision: dict) -> None:
 
     print("Decision     : APPROVED")
     print(f"Shares       : {decision['shares']}")
-    print(f"Entry        : ${decision['entry_price']:,.2f}")
-    print(f"Stop         : ${decision['stop_price']:,.2f}")
-    print(f"Target       : ${decision['target_price']:,.2f}")
+    print(
+        f"Entry        : "
+        f"${decision['entry_price']:,.2f}"
+    )
+    print(
+        f"Stop         : "
+        f"${decision['stop_price']:,.2f}"
+    )
+    print(
+        f"Target       : "
+        f"${decision['target_price']:,.2f}"
+    )
     print(
         f"Position     : "
         f"${decision['position_value']:,.2f}"
@@ -193,8 +213,10 @@ def display_trade_decision(decision: dict) -> None:
         f"1:{decision['risk_reward_ratio']:.2f}"
     )
 
-    if DRY_RUN:
-        print("Order status : DRY RUN — no order submitted")
+    print(
+        "Order status : "
+        "DRY RUN — no order submitted"
+    )
 
     print("=" * 65)
 
@@ -205,6 +227,7 @@ def run_scan(
     feature_engine: FeatureEngine,
     scanner: AIScanner,
     risk_manager: RiskManager,
+    journal: TradeJournal,
 ) -> None:
     print()
     print("=" * 65)
@@ -227,8 +250,14 @@ def run_scan(
         for position in positions
     }
 
-    print(f"Account equity: ${account_equity:,.2f}")
-    print(f"Buying power  : ${buying_power:,.2f}")
+    print(
+        f"Account equity: "
+        f"${account_equity:,.2f}"
+    )
+    print(
+        f"Buying power  : "
+        f"${buying_power:,.2f}"
+    )
     print(
         f"Open positions: "
         f"{len(open_position_symbols)}"
@@ -255,18 +284,32 @@ def run_scan(
                 .iloc[-1]
             )
 
-            results.append(
-                {
-                    "symbol": symbol,
-                    "confidence": confidence,
-                    "action": get_action(confidence),
-                    "entry_price": float(
-                        latest_complete_row["close"]
-                    ),
-                    "atr": float(
-                        latest_complete_row["ATR"]
-                    ),
-                }
+            entry_price = float(
+                latest_complete_row["close"]
+            )
+
+            atr = float(
+                latest_complete_row["ATR"]
+            )
+
+            action = get_action(confidence)
+
+            result = {
+                "symbol": symbol,
+                "confidence": confidence,
+                "action": action,
+                "entry_price": entry_price,
+                "atr": atr,
+            }
+
+            results.append(result)
+
+            journal.log_scan(
+                symbol=symbol,
+                confidence=confidence,
+                action=action,
+                price=entry_price,
+                atr=atr,
             )
 
             print(
@@ -281,7 +324,9 @@ def run_scan(
             )
 
     if not results:
-        print("No symbols were successfully scanned.")
+        print(
+            "No symbols were successfully scanned."
+        )
         return
 
     display_rankings(results)
@@ -299,15 +344,24 @@ def run_scan(
 
     if not buy_candidates:
         print()
-        print("No trades passed the buy threshold.")
+        print(
+            "No trades passed the buy threshold."
+        )
         return
 
     available_position_slots = max(
-        MAX_OPEN_POSITIONS - len(open_position_symbols),
+        MAX_OPEN_POSITIONS
+        - len(open_position_symbols),
         0,
     )
 
-    for candidate in buy_candidates[:available_position_slots]:
+    if available_position_slots == 0:
+        print()
+        print(
+            "No available position slots."
+        )
+
+    for candidate in buy_candidates:
         decision = risk_manager.evaluate_trade(
             symbol=candidate["symbol"],
             confidence=candidate["confidence"],
@@ -316,16 +370,31 @@ def run_scan(
             atr=candidate["atr"],
             account_equity=account_equity,
             buying_power=buying_power,
-            open_position_symbols=open_position_symbols,
+            open_position_symbols=(
+                open_position_symbols
+            ),
+        )
+
+        journal.log_trade_decision(
+            decision=decision,
+            dry_run=DRY_RUN,
         )
 
         display_trade_decision(decision)
 
-        if decision["approved"]:
-            buying_power -= decision["position_value"]
+        if (
+            decision["approved"]
+            and available_position_slots > 0
+        ):
+            buying_power -= decision[
+                "position_value"
+            ]
+
             open_position_symbols.add(
                 decision["symbol"]
             )
+
+            available_position_slots -= 1
 
 
 def main() -> None:
@@ -333,19 +402,40 @@ def main() -> None:
     data_manager = AlpacaDataManager()
     feature_engine = FeatureEngine()
     scanner = AIScanner()
+    journal = TradeJournal(PROJECT_ROOT)
 
     risk_manager = RiskManager(
         risk_per_trade=RISK_PER_TRADE,
-        max_position_percent=MAX_POSITION_PERCENT,
-        max_open_positions=MAX_OPEN_POSITIONS,
-        atr_stop_multiplier=ATR_STOP_MULTIPLIER,
-        atr_target_multiplier=ATR_TARGET_MULTIPLIER,
+        max_position_percent=(
+            MAX_POSITION_PERCENT
+        ),
+        max_open_positions=(
+            MAX_OPEN_POSITIONS
+        ),
+        atr_stop_multiplier=(
+            ATR_STOP_MULTIPLIER
+        ),
+        atr_target_multiplier=(
+            ATR_TARGET_MULTIPLIER
+        ),
     )
 
     print()
-    print("AI-DayTrader started in DRY-RUN mode.")
+    print(
+        "AI-DayTrader started in "
+        "DRY-RUN mode."
+    )
     print("No orders will be submitted.")
     print("Press Ctrl+C to stop.")
+    print()
+    print(
+        f"Scan journal: "
+        f"{journal.scan_file}"
+    )
+    print(
+        f"Trade journal: "
+        f"{journal.trade_file}"
+    )
 
     try:
         while True:
@@ -354,7 +444,10 @@ def main() -> None:
             if clock.is_open:
                 print()
                 print("Market status: OPEN")
-                print(f"Next close: {clock.next_close}")
+                print(
+                    f"Next close: "
+                    f"{clock.next_close}"
+                )
 
                 run_scan(
                     trading_client=trading_client,
@@ -362,26 +455,40 @@ def main() -> None:
                     feature_engine=feature_engine,
                     scanner=scanner,
                     risk_manager=risk_manager,
+                    journal=journal,
                 )
 
                 print(
                     f"\nNext scan in "
-                    f"{SCAN_INTERVAL_SECONDS // 60} minutes."
+                    f"{SCAN_INTERVAL_SECONDS // 60} "
+                    f"minutes."
                 )
 
-                time.sleep(SCAN_INTERVAL_SECONDS)
+                time.sleep(
+                    SCAN_INTERVAL_SECONDS
+                )
 
             else:
                 print()
                 print("Market status: CLOSED")
-                print(f"Next open: {clock.next_open}")
-                print("Checking again in 5 minutes.")
+                print(
+                    f"Next open: "
+                    f"{clock.next_open}"
+                )
+                print(
+                    "Checking again in "
+                    "5 minutes."
+                )
 
-                time.sleep(SCAN_INTERVAL_SECONDS)
+                time.sleep(
+                    SCAN_INTERVAL_SECONDS
+                )
 
     except KeyboardInterrupt:
         print()
-        print("AI-DayTrader stopped safely.")
+        print(
+            "AI-DayTrader stopped safely."
+        )
 
 
 if __name__ == "__main__":
