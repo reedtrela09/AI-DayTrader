@@ -4,20 +4,30 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
+from dotenv import load_dotenv
 
+from src.config.settings import (
+    ATR_STOP_MULTIPLIER,
+    ATR_TARGET_MULTIPLIER,
+    BUY_THRESHOLD,
+    DRY_RUN,
+    MAX_OPEN_POSITIONS,
+    MAX_POSITION_PERCENT,
+    RISK_PER_TRADE,
+    SCAN_INTERVAL_SECONDS,
+    WATCH_THRESHOLD,
+)
 from src.config.watchlist import WATCHLIST
 from src.data.alpaca_data import AlpacaDataManager
 from src.features.feature_engine import FeatureEngine
+from src.risk.risk_manager import RiskManager
 from src.scanner.scanner import AIScanner
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 RAW_FOLDER = PROJECT_ROOT / "data" / "raw"
 PROCESSED_FOLDER = PROJECT_ROOT / "data" / "processed"
-
-SCAN_INTERVAL_SECONDS = 300  # 5 minutes
 
 
 def create_trading_client() -> TradingClient:
@@ -27,7 +37,9 @@ def create_trading_client() -> TradingClient:
     secret_key = os.getenv("ALPACA_SECRET_KEY")
 
     if not api_key or not secret_key:
-        raise ValueError("Alpaca API keys were not found in .env.")
+        raise ValueError(
+            "Alpaca API keys were not found in .env."
+        )
 
     return TradingClient(
         api_key=api_key,
@@ -37,10 +49,10 @@ def create_trading_client() -> TradingClient:
 
 
 def get_action(confidence: float) -> str:
-    if confidence >= 0.75:
+    if confidence >= BUY_THRESHOLD:
         return "BUY"
 
-    if confidence >= 0.60:
+    if confidence >= WATCH_THRESHOLD:
         return "WATCH"
 
     return "HOLD"
@@ -53,17 +65,19 @@ def refresh_symbol(
 ) -> pd.DataFrame:
     print(f"Refreshing {symbol}...")
 
-    df = data_manager.download_5min(
+    dataframe = data_manager.download_5min(
         symbol=symbol,
         days=30,
     )
 
-    if df.empty:
-        raise ValueError(f"No market data was returned for {symbol}.")
+    if dataframe.empty:
+        raise ValueError(
+            f"No market data was returned for {symbol}."
+        )
 
-    df.columns = [
+    dataframe.columns = [
         str(column).lower()
-        for column in df.columns
+        for column in dataframe.columns
     ]
 
     required_columns = [
@@ -78,7 +92,7 @@ def refresh_symbol(
     missing_columns = [
         column
         for column in required_columns
-        if column not in df.columns
+        if column not in dataframe.columns
     ]
 
     if missing_columns:
@@ -91,33 +105,33 @@ def refresh_symbol(
     PROCESSED_FOLDER.mkdir(parents=True, exist_ok=True)
 
     raw_file = RAW_FOLDER / f"{symbol}_5min.csv"
-    df.to_csv(raw_file, index=False)
+    dataframe.to_csv(raw_file, index=False)
 
-    features_df = feature_engine.build(df)
+    features_dataframe = feature_engine.build(dataframe)
 
     processed_file = (
         PROCESSED_FOLDER
         / f"{symbol}_features.csv"
     )
 
-    features_df.to_csv(
+    features_dataframe.to_csv(
         processed_file,
         index=False,
     )
 
-    return features_df
+    return features_dataframe
 
 
-def display_results(results: list[dict]) -> None:
+def display_rankings(results: list[dict]) -> None:
     results.sort(
         key=lambda item: item["confidence"],
         reverse=True,
     )
 
     print()
-    print("=" * 60)
+    print("=" * 65)
     print(" AI DAYTRADER RESULTS")
-    print("=" * 60)
+    print("=" * 65)
     print()
     print(
         f"{'Rank':<6}"
@@ -125,7 +139,7 @@ def display_results(results: list[dict]) -> None:
         f"{'Confidence':<14}"
         f"Action"
     )
-    print("-" * 45)
+    print("-" * 48)
 
     for rank, result in enumerate(results, start=1):
         print(
@@ -136,38 +150,122 @@ def display_results(results: list[dict]) -> None:
         )
 
     print()
-    print("=" * 60)
+    print("=" * 65)
+
+
+def display_trade_decision(decision: dict) -> None:
+    print()
+    print("=" * 65)
+    print(" DRY-RUN TRADE DECISION")
+    print("=" * 65)
+
+    print(f"Symbol       : {decision['symbol']}")
+    print(f"Confidence   : {decision['confidence']:.2%}")
+
+    if not decision["approved"]:
+        print("Decision     : REJECTED")
+
+        for reason in decision["reasons"]:
+            print(f"Reason       : {reason}")
+
+        print("=" * 65)
+        return
+
+    print("Decision     : APPROVED")
+    print(f"Shares       : {decision['shares']}")
+    print(f"Entry        : ${decision['entry_price']:,.2f}")
+    print(f"Stop         : ${decision['stop_price']:,.2f}")
+    print(f"Target       : ${decision['target_price']:,.2f}")
+    print(
+        f"Position     : "
+        f"${decision['position_value']:,.2f}"
+    )
+    print(
+        f"Maximum loss : "
+        f"${decision['maximum_loss']:,.2f}"
+    )
+    print(
+        f"Potential P/L: "
+        f"${decision['potential_profit']:,.2f}"
+    )
+    print(
+        f"Risk/reward  : "
+        f"1:{decision['risk_reward_ratio']:.2f}"
+    )
+
+    if DRY_RUN:
+        print("Order status : DRY RUN — no order submitted")
+
+    print("=" * 65)
 
 
 def run_scan(
+    trading_client: TradingClient,
     data_manager: AlpacaDataManager,
     feature_engine: FeatureEngine,
     scanner: AIScanner,
+    risk_manager: RiskManager,
 ) -> None:
     print()
-    print("=" * 60)
+    print("=" * 65)
     print(" AI DAYTRADER")
-    print("=" * 60)
-    print(f"Scan started: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print("=" * 65)
+    print(
+        f"Scan started : "
+        f"{datetime.now():%Y-%m-%d %H:%M:%S}"
+    )
+    print()
+
+    account = trading_client.get_account()
+    positions = trading_client.get_all_positions()
+
+    account_equity = float(account.equity)
+    buying_power = float(account.buying_power)
+
+    open_position_symbols = {
+        position.symbol
+        for position in positions
+    }
+
+    print(f"Account equity: ${account_equity:,.2f}")
+    print(f"Buying power  : ${buying_power:,.2f}")
+    print(
+        f"Open positions: "
+        f"{len(open_position_symbols)}"
+    )
     print()
 
     results = []
 
     for symbol in WATCHLIST:
         try:
-            features_df = refresh_symbol(
+            features_dataframe = refresh_symbol(
                 symbol=symbol,
                 data_manager=data_manager,
                 feature_engine=feature_engine,
             )
 
-            confidence = scanner.score(features_df)
+            confidence = scanner.score(
+                features_dataframe
+            )
+
+            latest_complete_row = (
+                features_dataframe
+                .dropna()
+                .iloc[-1]
+            )
 
             results.append(
                 {
                     "symbol": symbol,
                     "confidence": confidence,
                     "action": get_action(confidence),
+                    "entry_price": float(
+                        latest_complete_row["close"]
+                    ),
+                    "atr": float(
+                        latest_complete_row["ATR"]
+                    ),
                 }
             )
 
@@ -177,12 +275,57 @@ def run_scan(
             )
 
         except Exception as error:
-            print(f"Could not process {symbol}: {error}")
+            print(
+                f"Could not process {symbol}: "
+                f"{error}"
+            )
 
-    if results:
-        display_results(results)
-    else:
+    if not results:
         print("No symbols were successfully scanned.")
+        return
+
+    display_rankings(results)
+
+    buy_candidates = [
+        result
+        for result in results
+        if result["confidence"] >= BUY_THRESHOLD
+    ]
+
+    buy_candidates.sort(
+        key=lambda item: item["confidence"],
+        reverse=True,
+    )
+
+    if not buy_candidates:
+        print()
+        print("No trades passed the buy threshold.")
+        return
+
+    available_position_slots = max(
+        MAX_OPEN_POSITIONS - len(open_position_symbols),
+        0,
+    )
+
+    for candidate in buy_candidates[:available_position_slots]:
+        decision = risk_manager.evaluate_trade(
+            symbol=candidate["symbol"],
+            confidence=candidate["confidence"],
+            minimum_confidence=BUY_THRESHOLD,
+            entry_price=candidate["entry_price"],
+            atr=candidate["atr"],
+            account_equity=account_equity,
+            buying_power=buying_power,
+            open_position_symbols=open_position_symbols,
+        )
+
+        display_trade_decision(decision)
+
+        if decision["approved"]:
+            buying_power -= decision["position_value"]
+            open_position_symbols.add(
+                decision["symbol"]
+            )
 
 
 def main() -> None:
@@ -191,8 +334,17 @@ def main() -> None:
     feature_engine = FeatureEngine()
     scanner = AIScanner()
 
+    risk_manager = RiskManager(
+        risk_per_trade=RISK_PER_TRADE,
+        max_position_percent=MAX_POSITION_PERCENT,
+        max_open_positions=MAX_OPEN_POSITIONS,
+        atr_stop_multiplier=ATR_STOP_MULTIPLIER,
+        atr_target_multiplier=ATR_TARGET_MULTIPLIER,
+    )
+
     print()
-    print("AI-DayTrader started.")
+    print("AI-DayTrader started in DRY-RUN mode.")
+    print("No orders will be submitted.")
     print("Press Ctrl+C to stop.")
 
     try:
@@ -205,9 +357,11 @@ def main() -> None:
                 print(f"Next close: {clock.next_close}")
 
                 run_scan(
+                    trading_client=trading_client,
                     data_manager=data_manager,
                     feature_engine=feature_engine,
                     scanner=scanner,
+                    risk_manager=risk_manager,
                 )
 
                 print(
